@@ -1,0 +1,8 @@
+# compiled MetaTrader binaries
+*.ex4
+*.ex5
+# runtime files
+MTC_master.txt*
+MTC_slave_*.txt
+__pycache__/
+.pytest_cache/
