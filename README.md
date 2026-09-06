@@ -51,9 +51,7 @@ If the master terminal goes offline or the signal stops updating, the slave free
    terminal shows you where that is.
 3. In MetaEditor open the file and press **F7** (Compile). There must be 0 errors.
 4. Back in the terminal, drag **CopyMaster** from the Navigator onto any chart (the symbol does
-   not matter). In the dialog tick **Allow Algo/Auto Trading** is *not* required for the master;
-   it only writes a file.
-5. Make sure the **AutoTrading** button in the toolbar is on anyway if you also run EAs there.
+   not matter). The master only writes a file, so *Allow Algo Trading* is not needed for it.
 
 The chart comment shows `MetaTraderCopy MASTER ... Positions published: N`. The file
 `MTC_master.txt` now appears in `C:\Users\<you>\AppData\Roaming\MetaQuotes\Terminal\Common\Files`.
