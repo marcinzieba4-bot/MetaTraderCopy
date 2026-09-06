@@ -6,23 +6,32 @@ Works with **MT4 and MT5 in any combination** (MT4 master → MT5 slave, MT5 →
 and across different brokers.
 
 ```
- ┌──────────────────────┐   writes 4x/s    ┌─────────────────────────────┐
- │ Terminal A (master)  │ ───────────────► │ %APPDATA%\MetaQuotes\       │
- │  CopyMaster EA       │                  │ Terminal\Common\Files\      │
- └──────────────────────┘                  │   MTC_master.txt            │
-                                           └──────────┬──────────────────┘
-                     reads 4x/s, opens/closes/modifies │
-          ┌──────────────────────┬─────────────────────┼─────────────────────┐
-          ▼                      ▼                     ▼                     ▼
- ┌────────────────┐    ┌────────────────┐    ┌────────────────┐    ┌────────────────┐
- │ Terminal B     │    │ Terminal C     │    │ Terminal D     │    │ ...            │
- │ CopySlave EA   │    │ CopySlave EA   │    │ CopySlave EA   │    │                │
- │ (MT5, broker X)│    │ (MT4, broker Y)│    │ (MT5, x0.5 lots)│   │                │
- └────────────────┘    └────────────────┘    └────────────────┘    └────────────────┘
+ SAME MACHINE (file transport)                       DIFFERENT MACHINES (relay transport)
+
+ ┌──────────────────┐   writes 4x/s                  ┌──────────────────┐   POST 2x/s
+ │ Terminal A       │ ───────────► Common\Files\    │ Machine A        │ ───────────► ┌────────────┐
+ │  CopyMaster EA   │              MTC_master.txt    │  CopyMaster EA   │              │ relay.py   │
+ └──────────────────┘                    │           └──────────────────┘              │ (HTTPS)    │
+                              reads 4x/s │                                             └─────┬──────┘
+          ┌──────────────────┬───────────┴──┐                              GET 4x/s          │
+          ▼                  ▼              ▼                       ┌────────────────┬───────┴────────┐
+ ┌────────────────┐ ┌────────────────┐ ┌────────────────┐           ▼                ▼                ▼
+ │ Terminal B     │ │ Terminal C     │ │ Terminal D     │  ┌────────────────┐ ┌────────────────┐ ┌────────────────┐
+ │ CopySlave EA   │ │ CopySlave EA   │ │ CopySlave EA   │  │ Machine B      │ │ Machine C      │ │ Machine D      │
+ │ (MT5, broker X)│ │ (MT4, broker Y)│ │ (x0.5 lots)    │  │ CopySlave EA   │ │ CopySlave EA   │ │ CopySlave EA   │
+ └────────────────┘ └────────────────┘ └────────────────┘  └────────────────┘ └────────────────┘ └────────────────┘
 ```
 
-All terminals must run on the **same Windows machine or VPS**, because they talk through the
-shared `Common\Files` folder. No DLLs, no internet service, no third party.
+Two transports, same EAs and same settings:
+
+* **Same machine or VPS**: master and slaves talk through the terminal's shared `Common\Files`
+  folder. Nothing to install besides the EAs. This is the default.
+* **Different machines** (your PC and a VPS, two AWS instances, any mix): the master POSTs the
+  signal to a tiny relay server (`relay/relay.py`, one Python file, HTTPS via Docker/Caddy) and
+  the slaves fetch it. Set `InpSignalUrl` and `InpApiKey` on both sides. Step by step in
+  [docs/remote-setup.md](docs/remote-setup.md).
+
+Both can be used at once (local slaves read the file, remote slaves read the relay).
 
 ## What gets copied
 
@@ -38,8 +47,8 @@ shared `Common\Files` folder. No DLLs, no internet service, no third party.
 
 Trades that already existed before the slave was started are ignored by default
 (`InpMaxTradeAgeSec = 120`), so you never copy a stale position at a bad price.
-If the master terminal goes offline or the signal stops updating, the slave freezes and does
-**not** close anything (`InpMaxSignalAgeSec`).
+If the master terminal goes offline, the relay is unreachable, or the signal stops updating, the
+slave freezes and does **not** close anything (`InpMaxSignalAgeSec`).
 
 ## Installation
 
@@ -59,7 +68,8 @@ The chart comment shows `MetaTraderCopy MASTER ... Positions published: N`. The 
 ### 2. Every slave terminal (the accounts that should follow)
 
 1. Install a **separate terminal** for each slave account (one terminal = one login). Different
-   brokers are fine. Keep them on the same machine as the master.
+   brokers are fine. Keep them on the same machine as the master, or follow
+   [docs/remote-setup.md](docs/remote-setup.md) to connect slaves on other machines through the relay.
 2. Copy `CopySlave.mq5` / `CopySlave.mq4` into that terminal's `MQL5\Experts` / `MQL4\Experts`
    folder and compile it (F7) in that terminal's MetaEditor.
 3. Drag **CopySlave** onto one chart. In the dialog:
@@ -87,10 +97,13 @@ Repeat for every slave account. All slaves read the same file, so adding account
 
 | Input                | Default          | Meaning |
 |----------------------|------------------|---------|
-| `InpSignalFile`      | `MTC_master.txt` | File name in `Common\Files`. Must match the master's `InpSignalFile`. Use different names to run several masters. |
+| `InpSignalFile`      | `MTC_master.txt` | File name in `Common\Files`. Must match the master's `InpSignalFile`. Use different names to run several masters. Used only when `InpSignalUrl` is empty. |
+| `InpSignalUrl`       | *(empty)*        | Relay URL such as `https://relay.example.com/signal/mymaster` when the master is on another machine. Must be whitelisted in `Tools → Options → Expert Advisors → Allow WebRequest`. |
+| `InpApiKey`          | *(empty)*        | Relay API key (read key). |
+| `InpHttpTimeoutMs`   | `2000`           | HTTP timeout for relay requests. |
 | `InpMasterAccount`   | `0`              | If non-zero, only accept signals from this master login (safety against picking the wrong file). |
 | `InpPollMs`          | `250`            | How often the file is read. 100–500 ms is sensible. |
-| `InpMaxSignalAgeSec` | `15`             | If the file is older than this, the master is considered offline and the slave does nothing. |
+| `InpMaxSignalAgeSec` | `15`             | If the signal is older than this, the master is considered offline and the slave does nothing. With the relay, the age is measured by the relay's clock. |
 | `InpMaxTradeAgeSec`  | `120`            | Only copy master trades opened within the last N seconds. `0` copies everything, including old positions, at the current price. |
 
 ### Lot sizing
@@ -131,11 +144,22 @@ The slave resolves a master symbol in this order:
 Anything that cannot be resolved is logged once and skipped. `InpAllowedSymbols`
 (`EURUSD,GBPUSD,XAUUSD`) restricts copying to a whitelist.
 
+### CopyMaster inputs
+
+| Input | Default | Meaning |
+|-------|---------|---------|
+| `InpSignalFile` | `MTC_master.txt` | Signal file name in `Common\Files` for slaves on the same machine. Empty disables the file. |
+| `InpWriteMs` | `250` | File publish interval. |
+| `InpSignalUrl` | *(empty)* | Relay URL for slaves on other machines. Empty disables the relay. |
+| `InpApiKey` | *(empty)* | Relay API key (write key). |
+| `InpPostMs` | `500` | Relay publish interval. Trade events publish immediately regardless. |
+| `InpHttpTimeoutMs` | `2000` | HTTP timeout for relay requests. |
+
 ## How it works (for maintenance)
 
-* **CopyMaster** runs on a 250 ms timer plus every trade event. It writes all open market
-  positions to `MTC_master.txt.tmp` and then atomically renames it over `MTC_master.txt`, so a
-  reader never sees a half-written file. Format:
+* **CopyMaster** runs on a 250 ms timer plus every trade event. It builds the signal text, writes
+  it to `MTC_master.txt.tmp` and atomically renames it over `MTC_master.txt` (so a reader never
+  sees a half-written file), and/or POSTs the same text to the relay. Format:
 
   ```
   HDR|1|<login>|<currency>|<balance>|<equity>|<serverTime>|<gmtTime>|MT5
@@ -155,16 +179,23 @@ Anything that cannot be resolved is logged once and skipped. `InpAllowedSymbols`
   after every change and reloaded on start; copies are additionally tagged with comment
   `MC<master ticket>` so links can be rebuilt if that file is lost.
 
-* `tools/signal_monitor.py` prints and validates the signal file (`--follow` to watch live,
-  `--check` for a health check that exits non-zero when the file is stale). `tools/test_signal_format.py`
-  covers the parser.
+* **relay/relay.py** keeps the newest signal per channel in memory (and on disk), checks the API
+  key on every request, validates posted signals, and returns an `X-Age-Seconds` header that the
+  slave uses for its staleness check. `relay/test_relay.py` covers it end to end.
+
+* `tools/signal_monitor.py` prints and validates the signal from the file or the relay (`--url`,
+  `--follow` to watch live, `--check` for a health check that exits non-zero when stale).
+  `tools/test_signal_format.py` covers the parser.
 
 ## Troubleshooting
 
 | Chart status / log line                          | Cause and fix |
 |--------------------------------------------------|---------------|
 | `signal file not readable`                       | CopyMaster is not running, or a different `InpSignalFile` name. Check `Common\Files` for the file. |
-| `signal is N s old - master offline?`            | Master terminal closed, disconnected, or its EA was removed. The slave does nothing until it comes back. |
+| `signal is N s old - master offline?`            | Master terminal closed, disconnected, or its EA was removed (or, with the relay, the master cannot reach the relay). The slave does nothing until it comes back. |
+| `WebRequest error 4014`                          | The relay URL is not whitelisted: `Tools → Options → Expert Advisors → Allow WebRequest for listed URL`, add the origin (e.g. `https://relay.example.com`). |
+| `relay HTTP 401`                                 | Wrong `InpApiKey` (master needs the write key, slaves the read key). |
+| `relay has no signal yet`                        | Master is not posting to this URL/channel, or the relay restarted without `MTC_DATA_DIR`. |
 | `AutoTrading is disabled in the terminal`        | Press the AutoTrading / Algo Trading toolbar button on the slave. |
 | `Algo trading not allowed for this EA`           | Re-open the EA properties, Common tab, tick *Allow Algo Trading*. |
 | `no tradable symbol found for master symbol X`   | Set `InpMasterSuffix` / `InpSlaveSuffix` / `InpSymbolMap`. |
@@ -178,13 +209,12 @@ Both EAs log everything to the **Experts** tab of the terminal (`Toolbox → Exp
 ## Limitations and possible next steps
 
 * Pending orders (limit/stop) are not copied; only their execution is, once they become positions.
-* Master and slaves must share a machine. For separate machines, the simplest extension is to
-  have the master POST the same text to a tiny HTTP/WebSocket relay and the slaves fetch it
-  (`WebRequest` in MQL); the file format and the slave logic stay unchanged.
+* The relay is polled, not pushed: remote latency is the poll interval plus two round trips
+  (roughly 0.3 to 0.8 s). A WebSocket push would be the next step if that matters.
 * MT5 netting slave accounts are supported only loosely (see warning above).
 * Lot sizing by balance/equity does not convert account currencies.
-* Latency is one poll interval (default 250 ms) plus execution time at the slave broker; price
-  differences between brokers are not compensated.
+* Local latency is one poll interval (default 250 ms) plus execution time at the slave broker;
+  price differences between brokers are not compensated.
 
 ## Risk notice
 

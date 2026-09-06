@@ -1,0 +1,4 @@
+# Replace with your DNS name. Caddy obtains and renews the TLS certificate automatically.
+relay.example.com {
+    reverse_proxy relay:8080
+}

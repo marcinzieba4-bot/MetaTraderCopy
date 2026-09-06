@@ -42,7 +42,10 @@ enum ENUM_SLTP_MODE
 };
 
 //--- Signal source
-input string          InpSignalFile      = "MTC_master.txt"; // Signal file name (Common\Files)
+input string          InpSignalFile      = "MTC_master.txt"; // Signal file name (Common\Files) - used when URL is empty
+input string          InpSignalUrl       = "";               // Relay URL (master on another machine), e.g. https://relay.example.com/signal/mymaster
+input string          InpApiKey          = "";               // Relay API key
+input int             InpHttpTimeoutMs   = 2000;             // HTTP timeout, milliseconds
 input long            InpMasterAccount   = 0;                // Expected master login (0 = accept any)
 input int             InpPollMs          = 250;              // Poll interval, milliseconds
 input int             InpMaxSignalAgeSec = 15;               // Signal older than this = master offline, seconds
@@ -123,6 +126,7 @@ string    g_status           = "starting";
 string    g_stateFile        = "";
 bool      g_dirty            = false;
 bool      g_busy             = false;
+long      g_relayAge         = -1;      // signal age reported by the relay (-1 = not available)
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -301,18 +305,69 @@ void RescueLinksFromComments()
    }
 }
 //+------------------------------------------------------------------+
-//| Signal file reading                                              |
+//| Signal transport: local file or HTTP relay                       |
+//+------------------------------------------------------------------+
+bool FetchFromFile(string &text)
+{
+   int h = FileOpen(InpSignalFile, FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON | FILE_SHARE_READ | FILE_SHARE_WRITE);
+   if(h == INVALID_HANDLE) { g_status = "signal file not readable: Common\\Files\\" + InpSignalFile; return(false); }
+   text = "";
+   while(!FileIsEnding(h))
+      text += FileReadString(h) + "\n";
+   FileClose(h);
+   g_relayAge = -1;
+   return(true);
+}
+//--- The relay URL must be listed in Tools > Options > Expert Advisors > "Allow WebRequest for listed URL".
+bool FetchFromUrl(string &text)
+{
+   char   data[];
+   char   result[];
+   string resultHeaders;
+   string headers = "";
+   if(InpApiKey != "") headers = "X-Api-Key: " + InpApiKey + "\r\n";
+
+   ResetLastError();
+   int code = WebRequest("GET", InpSignalUrl, headers, InpHttpTimeoutMs, data, result, resultHeaders);
+   if(code == -1)
+   {
+      int err = GetLastError();
+      g_status = "WebRequest error " + (string)err + (err == 4014 ? " - add the relay URL in Tools > Options > Expert Advisors" : "");
+      return(false);
+   }
+   if(code == 404) { g_status = "relay has no signal yet - is CopyMaster running and posting to the same URL?"; return(false); }
+   if(code != 200) { g_status = "relay HTTP " + (string)code + " " + CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8); return(false); }
+
+   text = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+
+   // The relay reports how long ago it received the signal (its own clock), which
+   // makes the staleness check independent of clock differences between machines.
+   g_relayAge = -1;
+   int pos = StringFind(resultHeaders, "X-Age-Seconds:");
+   if(pos >= 0)
+   {
+      string rest = StringSubstr(resultHeaders, pos + 14);
+      int eol = StringFind(rest, "\n");
+      if(eol >= 0) rest = StringSubstr(rest, 0, eol);
+      g_relayAge = (long)MathRound(StringToDouble(Trim(rest)));
+   }
+   return(true);
+}
 //+------------------------------------------------------------------+
 bool ReadSignal()
 {
-   int h = FileOpen(InpSignalFile, FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON | FILE_SHARE_READ | FILE_SHARE_WRITE);
-   if(h == INVALID_HANDLE) return(false);
+   string text;
+   bool ok = (InpSignalUrl != "" ? FetchFromUrl(text) : FetchFromFile(text));
+   if(!ok) return(false);
 
    MasterPos tmp[];
    bool haveHdr = false, haveEnd = false;
-   while(!FileIsEnding(h))
+   string lines[];
+   int nl = StringSplit(text, '\n', lines);
+   for(int li = 0; li < nl; li++)
    {
-      string line = FileReadString(h);
+      string line = lines[li];
+      StringTrimRight(line);
       string p[];
       int n = StringSplit(line, '|', p);
       if(n < 1) continue;
@@ -343,8 +398,7 @@ bool ReadSignal()
       else if(p[0] == "END")
          haveEnd = true;
    }
-   FileClose(h);
-   if(!haveHdr || !haveEnd) return(false);
+   if(!haveHdr || !haveEnd) { g_status = "signal is incomplete (no HDR/END) - retrying"; return(false); }
 
    ArrayResize(g_master, ArraySize(tmp));
    for(int i = 0; i < ArraySize(tmp); i++) g_master[i] = tmp[i];
@@ -673,13 +727,13 @@ int FindSuccessor(const MState &st)
 void Process()
 {
    //--- 1. read and validate the signal
-   if(!ReadSignal()) { g_status = "signal file not readable: Common\\Files\\" + InpSignalFile; return; }
+   if(!ReadSignal()) return;   // g_status already explains why
    if(InpMasterAccount != 0 && g_masterLogin != InpMasterAccount)
    {
       g_status = StringFormat("signal is from account %I64d, expected %I64d - ignoring", g_masterLogin, InpMasterAccount);
       return;
    }
-   long age = (long)TimeGMT() - (long)g_masterGmt;
+   long age = SignalAge();
    if(age > InpMaxSignalAgeSec)
    {
       g_status = StringFormat("signal is %d s old - master offline? (no action taken)", (int)age);
@@ -790,11 +844,17 @@ void Process()
    g_status = "OK";
 }
 //+------------------------------------------------------------------+
+long SignalAge()
+{
+   if(g_relayAge >= 0) return(g_relayAge);
+   return((long)TimeGMT() - (long)g_masterGmt);
+}
+//+------------------------------------------------------------------+
 void ShowStatus()
 {
-   long age = (long)TimeGMT() - (long)g_masterGmt;
-   Comment(StringFormat("MetaTraderCopy SLAVE (MT4)   magic %d\nMaster: %I64d (%s)  balance %.2f %s  equity %.2f\nSignal: Common\\Files\\%s   age %d s\nMaster positions: %d   linked copies: %d\nStatus: %s",
+   long age = SignalAge();
+   Comment(StringFormat("MetaTraderCopy SLAVE (MT4)   magic %d\nMaster: %I64d (%s)  balance %.2f %s  equity %.2f\nSignal: %s   age %d s\nMaster positions: %d   linked copies: %d\nStatus: %s",
                         InpMagic, g_masterLogin, g_masterPlatform, g_masterBalance, g_masterCurrency, g_masterEquity,
-                        InpSignalFile, (int)age, ArraySize(g_master), ArraySize(g_links), g_status));
+                        (InpSignalUrl != "" ? InpSignalUrl : "Common\\Files\\" + InpSignalFile), (int)age, ArraySize(g_master), ArraySize(g_links), g_status));
 }
 //+------------------------------------------------------------------+

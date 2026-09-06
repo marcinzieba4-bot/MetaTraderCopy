@@ -6,6 +6,7 @@ Usage:
     python signal_monitor.py path/to/file    # explicit path
     python signal_monitor.py --follow        # refresh every second
     python signal_monitor.py --check         # exit 1 if the file is missing, malformed or stale
+    python signal_monitor.py --url https://relay.example.com/signal/mymaster --key KEY   # read from the relay
 
 Useful when a slave shows "signal file not readable" or "signal is N s old":
 it shows exactly what the master publishes and how old it is.
@@ -14,6 +15,8 @@ import argparse
 import os
 import sys
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -108,20 +111,38 @@ def render(sig: Signal, path: str) -> str:
     return "\n".join(out)
 
 
+def read_source(args) -> str:
+    if args.url:
+        req = urllib.request.Request(args.url, headers={"X-Api-Key": args.key} if args.key else {})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            raise ValueError(f"relay answered HTTP {exc.code}: {exc.read().decode(errors='replace').strip()}") from None
+    with open(args.path, "r", encoding="latin-1") as fh:
+        return fh.read()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("path", nargs="?", default=default_path())
     ap.add_argument("--follow", "-f", action="store_true", help="refresh every second")
     ap.add_argument("--check", action="store_true", help="exit non-zero if missing, malformed or older than --max-age")
     ap.add_argument("--max-age", type=float, default=15.0, help="seconds (used with --check)")
+    ap.add_argument("--url", help="read from the relay instead of a file, e.g. https://relay.example.com/signal/mymaster")
+    ap.add_argument("--key", default=os.environ.get("MTC_API_KEY", ""), help="relay API key (or MTC_API_KEY)")
     args = ap.parse_args()
+    source = args.url or args.path
 
     while True:
         try:
-            with open(args.path, "r", encoding="latin-1") as fh:
-                sig = parse_signal(fh.read())
+            sig = parse_signal(read_source(args))
         except FileNotFoundError:
             print(f"signal file not found: {args.path}", file=sys.stderr)
+            if not args.follow:
+                return 1
+        except (urllib.error.URLError, OSError) as exc:
+            print(f"relay not reachable: {exc}", file=sys.stderr)
             if not args.follow:
                 return 1
         except ValueError as exc:
@@ -131,7 +152,7 @@ def main() -> int:
         else:
             if args.follow:
                 os.system("cls" if os.name == "nt" else "clear")
-            print(render(sig, args.path))
+            print(render(sig, source))
             if args.check:
                 age = time.time() - sig.header.gmt_time
                 if age > args.max_age:

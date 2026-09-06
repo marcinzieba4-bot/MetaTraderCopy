@@ -1,0 +1,27 @@
+# Relay + automatic HTTPS (Let's Encrypt via Caddy).
+#   1. point a DNS name (e.g. relay.example.com) at this machine, open ports 80 and 443
+#   2. edit Caddyfile with that name
+#   3. MTC_API_KEY=... MTC_WRITE_KEY=... docker compose up -d
+services:
+  relay:
+    build: .
+    restart: unless-stopped
+    environment:
+      MTC_API_KEY: ${MTC_API_KEY:?set MTC_API_KEY}
+      MTC_WRITE_KEY: ${MTC_WRITE_KEY:-}
+    volumes:
+      - relay-data:/data
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+volumes:
+  relay-data:
+  caddy-data:
+  caddy-config:

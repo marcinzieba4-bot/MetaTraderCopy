@@ -1,0 +1,20 @@
+# systemd unit for running the relay without Docker on a Linux host.
+#   sudo cp relay.py /opt/mtc-relay/relay.py
+#   sudo cp mtc-relay.service /etc/systemd/system/ && sudo systemctl enable --now mtc-relay
+[Unit]
+Description=MetaTraderCopy relay
+After=network.target
+
+[Service]
+Environment=MTC_API_KEY=CHANGE_ME
+Environment=MTC_WRITE_KEY=
+Environment=MTC_PORT=8080
+Environment=MTC_DATA_DIR=/var/lib/mtc-relay
+ExecStart=/usr/bin/python3 /opt/mtc-relay/relay.py
+Restart=always
+RestartSec=2
+DynamicUser=yes
+StateDirectory=mtc-relay
+
+[Install]
+WantedBy=multi-user.target
